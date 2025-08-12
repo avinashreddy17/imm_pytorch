@@ -1,29 +1,30 @@
 #!/bin/bash
-#SBATCH --job-name=imm_training
-#SBATCH --output=logs/imm_training_%j.out
-#SBATCH --error=logs/imm_training_%j.err
+#SBATCH --job-name=imm-pytorch-train
+#SBATCH --partition=dgx1
+#SBATCH --qos=gpu2
+#SBATCH --gres=gpu:2
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --gres=gpu:4
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 #SBATCH --time=24:00:00
-#SBATCH --partition=gpu
+#SBATCH --output=slurm_train_%j.out
+#SBATCH --error=slurm_train_%j.err
 
-# Create logs directory
+set -euo pipefail
+echo "Job $SLURM_JOB_ID on $(hostname) at $(date)"
+cd "$SLURM_SUBMIT_DIR"
+
+# Conda env
+source ~/avinash/miniconda3/etc/profile.d/conda.sh
+conda activate imm_pytorch
+
 mkdir -p logs
 
-# Set environment variables
-export MASTER_PORT=12355
-export PYTHONPATH=$PYTHONPATH:$(pwd)
+python -V
+nvidia-smi || true
 
-# Get the config files from command line arguments
-CONFIG_FILES="$@"
-
-echo "Starting SLURM training with configs: $CONFIG_FILES"
-echo "Number of nodes: $SLURM_NNODES"
-echo "Number of tasks: $SLURM_NTASKS"
-echo "Number of GPUs per node: $SLURM_GPUS_PER_NODE"
-
-# Run training script
-srun python scripts/train.py --configs $CONFIG_FILES --ngpus $SLURM_NTASKS
-
-echo "Training completed!"
+# Use torchrun to spawn 2 local processes (1 per GPU)
+torchrun --nproc_per_node=2 scripts/train.py \
+  --configs configs/paths/default.yaml configs/experiments/celeba-10pts.yaml \
+  --ngpus 2 --num-epochs 150
