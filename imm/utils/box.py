@@ -25,7 +25,7 @@ class Box(dict):
                 self[key] = [Box(item) if isinstance(item, dict) and not isinstance(item, Box) else item for item in value]
         
         # Set up attribute access after initialization
-        self.__dict__ = self
+        object.__setattr__(self, '__dict__', self)
     
     def __setitem__(self, key: str, value: Any):
         if isinstance(value, dict) and not isinstance(value, Box):
@@ -37,7 +37,10 @@ class Box(dict):
             self.__dict__[key] = value
     
     def __setattr__(self, key: str, value: Any):
-        self[key] = value
+        if key.startswith('__') and key.endswith('__'):
+            object.__setattr__(self, key, value)
+        else:
+            self[key] = value
     
     def __getattr__(self, key: str):
         try:
