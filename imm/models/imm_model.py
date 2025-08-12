@@ -132,19 +132,17 @@ class IMMModel(BaseModel):
                 grouped_embeddings[rs] + grouped_pose_embeddings[rs], dim=1
             )
         
-        # Generate future image
-        future_im_pred = self.renderer(joint_embeddings, max_size)
-        
-        # Handle channel bug fix if needed
+        # Determine extra channels for perceptual workaround (match original TF behavior)
         workaround_channels = 0
         if hasattr(self.config, 'channels_bug_fix') and self.config.channels_bug_fix:
             workaround_channels = len(self.config.perceptual.comp)
-        
-        color_channels = future_im_pred.shape[1] - workaround_channels
-        if workaround_channels > 0:
-            future_im_pred_mu = future_im_pred[:, :color_channels]
-        else:
-            future_im_pred_mu = future_im_pred
+
+        # Generate future image with correct number of output channels
+        n_final_out = 3 + workaround_channels
+        future_im_pred = self.renderer(joint_embeddings, max_size, n_final_out=n_final_out)
+
+        # Keep only RGB for the reconstruction loss; drop workaround channels if present
+        future_im_pred_mu = future_im_pred[:, :3]
         
         # Prepare outputs
         outputs = {
