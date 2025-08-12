@@ -99,23 +99,37 @@ class VGG16Features(nn.Module):
             Convolution layer with loaded weights
         """
         conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=True)
-        
-        # Load weights from pretrained model
-        if name in self.data and '0' in self.data[name]:
-            # Load weights - convert from Caffe format to PyTorch
-            weights = self.data[name]['0'].copy()
-            weights = torch.from_numpy(weights.transpose(2, 3, 1, 0))  # HWIO -> OIHW
-            
-            # Special handling for conv1_1 (BGR to RGB conversion)
-            if name == 'conv1_1' and weights.shape[1] == 3:
-                weights = weights[:, [2, 1, 0], :, :]  # BGR to RGB
-            
-            conv.weight.data = weights
-        
-        # Load biases
-        if name in self.data and '1' in self.data[name]:
-            biases = self.data[name]['1'].copy()
-            conv.bias.data = torch.from_numpy(biases)
+
+        # Load weights from pretrained model (shape-safe)
+        if name in self.data:
+            w_np = self.data[name].get('0', None)
+            b_np = self.data[name].get('1', None)
+            if w_np is not None:
+                w = torch.from_numpy(w_np)
+                # Many HDF5s store as [H, W, in, out]; convert to [out, in, H, W]
+                if w.dim() == 4 and w.shape[0] == 3 and w.shape[1] == 3:
+                    # Likely already [H, W, in, out]; fallback to transpose below
+                    pass
+                # Try common HWIO -> OIHW
+                if w.shape != conv.weight.data.shape:
+                    if w.dim() == 4 and w.shape[-1] == out_channels and w.shape[2] == in_channels:
+                        w = w.permute(3, 2, 0, 1).contiguous()  # HWIO -> OIHW
+                    elif w.dim() == 4 and w.shape[-1] == out_channels and w.shape[2] == 3 and in_channels == 1:
+                        # HWIO with 3 input channels; average to grayscale then transpose
+                        w = w.mean(dim=2, keepdim=True).permute(3, 2, 0, 1).contiguous()
+                    elif w.dim() == 4 and w.shape[0] == out_channels and w.shape[1] == in_channels:
+                        # Already [out, in, H, W]
+                        pass
+                # Special handling for conv1_1 BGR->RGB if 3 input channels
+                if name == 'conv1_1' and w.dim() == 4 and w.shape[1] == 3 and in_channels == 3:
+                    w = w[:, [2, 1, 0], :, :]
+                # Final shape check
+                if w.shape == conv.weight.data.shape:
+                    conv.weight.data = w
+            if b_np is not None:
+                b = torch.from_numpy(b_np)
+                if b.shape == conv.bias.data.shape:
+                    conv.bias.data = b
         
         return conv
 
