@@ -120,8 +120,8 @@ class Trainer:
             self.optimizer.zero_grad()
             outputs = self.model(batch, training=True)
             
-            # Compute loss
-            loss = self.model.compute_loss(outputs, batch, training=True)
+            # Compute loss (unwrap DDP if needed)
+            loss = self._get_model_for_loss().compute_loss(outputs, batch, training=True)
             
             # Backward pass
             loss.backward()
@@ -187,7 +187,7 @@ class Trainer:
                 
                 # Forward pass
                 outputs = self.model(batch, training=False)
-                loss = self.model.compute_loss(outputs, batch, training=False)
+                loss = self._get_model_for_loss().compute_loss(outputs, batch, training=False)
                 
                 val_metrics['loss'].append(loss.item())
                 
@@ -204,6 +204,10 @@ class Trainer:
                 self.writer.add_scalar(f'val/{k}', v, self.global_step)
         
         return avg_metrics
+
+    def _get_model_for_loss(self) -> nn.Module:
+        """Return the underlying model for loss computation (unwrap DDP if present)."""
+        return self.model.module if hasattr(self.model, 'module') else self.model
     
     def _log_images(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor],
                    step: int, prefix: str = 'train'):
