@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+.venv/
+
+# Data and logs
+data/
+logs/
+checkpoints/
+**/model_final.pth
+**/*.pth
+**/*.ckpt
+
+# Generated artifacts
+landmarks_demo.png
+*.zip
+*.tar
+*.tar.gz
+
+# Jupyter
+.ipynb_checkpoints/
+
+
