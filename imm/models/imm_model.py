@@ -597,9 +597,8 @@ class SimpleRenderer(nn.Module):
                 
                 if current_size == final_res:
                     # Final layer
-                    self.conv_layers[layer_name] = nn.Conv2d(
-                        in_channels, n_final_out, 3, padding=1, bias=True
-                    )
+                    self.conv_layers[layer_name] = nn.Conv2d(in_channels, n_final_out, 3, padding=1, bias=True)
+                    self.conv_layers[layer_name] = self.conv_layers[layer_name].to(x.device)
                 else:
                     # Intermediate layer
                     self.conv_layers[layer_name] = nn.Sequential(
@@ -607,6 +606,7 @@ class SimpleRenderer(nn.Module):
                         nn.BatchNorm2d(filters),
                         nn.ReLU(inplace=True)
                     )
+                    self.conv_layers[layer_name] = self.conv_layers[layer_name].to(x.device)
             
             # Apply convolution
             x = self.conv_layers[layer_name](x)
@@ -622,6 +622,7 @@ class SimpleRenderer(nn.Module):
                         nn.BatchNorm2d(filters),
                         nn.ReLU(inplace=True)
                     )
+                    self.conv_layers[layer_name2] = self.conv_layers[layer_name2].to(x.device)
                 
                 x = self.conv_layers[layer_name2](x)
                 
