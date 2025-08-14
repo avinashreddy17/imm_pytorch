@@ -159,13 +159,15 @@ def main(args):
         train_dataset_class = import_dataset('celeba')
         train_dset = train_dataset_class(
             config.training.datadir, dataset='mafl', subset='train',
-            order_stream=True, tps=False, image_size=[im_size, im_size]
+            order_stream=True, tps=False, image_size=[im_size, im_size],
+            landmarks=True
         )
     elif args.train_dataset == 'aflw':
         train_dataset_class = import_dataset('aflw')
         train_dset = train_dataset_class(
             config.training.datadir, subset='train',
-            order_stream=True, tps=False, image_size=[im_size, im_size]
+            order_stream=True, tps=False, image_size=[im_size, im_size],
+            landmarks=True
         )
     else:
         raise ValueError(f'Dataset {args.train_dataset} not supported.')
@@ -175,13 +177,15 @@ def main(args):
         test_dataset_class = import_dataset('celeba')
         test_dset = test_dataset_class(
             config.training.datadir, dataset='mafl', subset=args.test_split,
-            order_stream=True, tps=False, image_size=[im_size, im_size]
+            order_stream=True, tps=False, image_size=[im_size, im_size],
+            landmarks=True
         )
     elif args.test_dataset == 'aflw':
         test_dataset_class = import_dataset('aflw')
         test_dset = test_dataset_class(
             config.training.datadir, subset=args.test_split,
-            order_stream=True, tps=False, image_size=[im_size, im_size]
+            order_stream=True, tps=False, image_size=[im_size, im_size],
+            landmarks=True
         )
     else:
         raise ValueError(f'Dataset {args.test_dataset} not supported.')
