@@ -34,7 +34,8 @@ echo "[EVAL] Node : $(hostname)"
 echo "[EVAL] Dir  : $SLURM_SUBMIT_DIR"
 cd "$SLURM_SUBMIT_DIR"
 
-# Ensure repo is importable
+# Ensure repo is importable (handle empty PYTHONPATH under 'set -u')
+export PYTHONPATH="${PYTHONPATH:-}"
 export PYTHONPATH="$SLURM_SUBMIT_DIR:$PYTHONPATH"
 
 # Activate conda env
