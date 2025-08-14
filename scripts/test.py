@@ -185,7 +185,7 @@ def main(args):
     if iteration is not None:
         net_file = f'model_epoch_{iteration}.pth'
     else:
-        net_file = 'model_final.pth'
+        net_file = 'model_epoch_40.pth'
     
     checkpoint_file = osp.join(config.training.logdir, net_file)
     if not osp.isfile(checkpoint_file):
