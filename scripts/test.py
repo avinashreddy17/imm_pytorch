@@ -58,12 +58,17 @@ def evaluate(net_class, net_file: str, model_config: Box, training_config: Box,
     model = model.to(device)
     model.eval()
     
-    # Load checkpoint
+    # Load checkpoint robustly (handles DDP 'module.' prefix)
     checkpoint = torch.load(net_file, map_location=device)
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        model.load_state_dict(checkpoint)
+    state = checkpoint['model_state_dict'] if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint else checkpoint
+
+    # Strip 'module.' prefix if present (DDP checkpoints)
+    if any(k.startswith('module.') for k in state.keys()):
+        state = {k.replace('module.', '', 1): v for k, v in state.items()}
+
+    # Load with strict=False (skip any non-matching keys e.g. VGG16 variants)
+    res = model.load_state_dict(state, strict=False)
+    print(f"Loaded checkpoint (strict=False). Missing: {len(res.missing_keys)}, Unexpected: {len(res.unexpected_keys)}")
     
     def evaluate_dataset(dataset):
         """Evaluate model on a dataset."""
