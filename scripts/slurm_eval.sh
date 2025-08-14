@@ -71,6 +71,51 @@ PY
 echo "[EVAL] Running: python scripts/test.py $@"
 python scripts/test.py "$@"
 
+# Optional visualizations
+# 1) quick synthetic visualization demo (writes landmarks_demo.png)
+echo "[EVAL] Running quick visualization demo (synthetic)..."
+python examples/visualize_landmarks.py || true
+
+# 2) dataset overlays using the evaluated experiment and dataset args
+# Parse a few key flags from "$@" to reuse for visualization
+EXP_NAME=""; TEST_DATASET=""; TEST_SPLIT="test"; IM_SIZE="128"; ITERATION=""
+ARGS=("$@")
+for ((i=0; i<${#ARGS[@]}; i++)); do
+  case "${ARGS[$i]}" in
+    --experiment-name)
+      EXP_NAME="${ARGS[$i+1]:-}"; i=$((i+1));;
+    --test-dataset)
+      TEST_DATASET="${ARGS[$i+1]:-}"; i=$((i+1));;
+    --test-split)
+      TEST_SPLIT="${ARGS[$i+1]:-}"; i=$((i+1));;
+    --im-size)
+      IM_SIZE="${ARGS[$i+1]:-}"; i=$((i+1));;
+    --iteration)
+      ITERATION="${ARGS[$i+1]:-}"; i=$((i+1));;
+  esac
+done
+
+if [[ -n "$EXP_NAME" && -n "$TEST_DATASET" ]]; then
+  OUT_DIR="viz_out_${TEST_DATASET}_${TEST_SPLIT}"
+  echo "[EVAL] Visualizing dataset samples → $OUT_DIR (dataset=$TEST_DATASET subset=$TEST_SPLIT)"
+  if [[ -n "$ITERATION" ]]; then
+    python scripts/visualize_dataset.py \
+      --experiment-name "$EXP_NAME" \
+      --dataset "$TEST_DATASET" --subset "$TEST_SPLIT" \
+      --paths-config configs/paths/default.yaml \
+      --im-size "$IM_SIZE" --num-samples 16 --out-dir "$OUT_DIR" \
+      --iteration "$ITERATION" || true
+  else
+    python scripts/visualize_dataset.py \
+      --experiment-name "$EXP_NAME" \
+      --dataset "$TEST_DATASET" --subset "$TEST_SPLIT" \
+      --paths-config configs/paths/default.yaml \
+      --im-size "$IM_SIZE" --num-samples 16 --out-dir "$OUT_DIR" || true
+  fi
+else
+  echo "[EVAL] Skipping dataset overlays (could not parse --experiment-name/--test-dataset from args)"
+fi
+
 echo "=========================================================="
 echo "[EVAL] Finished at $(date)"
 echo "=========================================================="
