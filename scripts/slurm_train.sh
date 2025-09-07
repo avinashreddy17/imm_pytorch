@@ -5,11 +5,11 @@
 #SBATCH --gres=gpu:2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=24:00:00
-#SBATCH --output=slurm_train_%j.out
-#SBATCH --error=slurm_train_%j.err
+#SBATCH --cpus-per-task=16                 # More CPUs for data loading
+#SBATCH --mem=64G                          # More memory for larger training
+#SBATCH --time=48:00:00                    # Longer time for full training
+#SBATCH --output=logs/slurm_train_%j.out
+#SBATCH --error=logs/slurm_train_%j.err
 
 set -euo pipefail
 
@@ -36,7 +36,7 @@ nvidia-smi || true
 
 # 3) Preflight: verify packages, config, datadir, importability
 CONFIG_PATHS="configs/paths/default.yaml"
-EXPERIMENT_CFG="configs/experiments/celeba-10pts.yaml"
+EXPERIMENT_CFG="configs/experiments/celeba-10pts-mini.yaml"  # Updated to match your current training
 
 python - <<'PY'
 import os, sys
@@ -62,7 +62,7 @@ print("  ok: imported imm.models.imm_model")
 print("\n[PRE-FLIGHT] Checking config files and datadir...")
 import yaml, metayaml
 paths = "configs/paths/default.yaml"
-exp   = "configs/experiments/celeba-10pts.yaml"
+exp   = "configs/experiments/celeba-10pts-mini.yaml"
 for f in [paths, exp]:
     if not os.path.isfile(f):
         print(f"  FAIL: missing {f}")
@@ -93,9 +93,13 @@ echo "[LAUNCH] Using $NGPUS GPUs"
 # export NCCL_P2P_DISABLE=1
 # export NCCL_DEBUG=INFO
 
+# Resume from checkpoint if provided (update path as needed)
+CHECKPOINT_ARGS=""
+# CHECKPOINT_ARGS="--checkpoint logs/celeba-10pts-mini/model_epoch_10.pth --restore-optim"
+
 python -m torch.distributed.run --nproc_per_node=${NGPUS} scripts/train.py \
   --configs ${CONFIG_PATHS} ${EXPERIMENT_CFG} \
-  --ngpus ${NGPUS} --num-epochs 150
+  --ngpus ${NGPUS} --num-epochs 100 ${CHECKPOINT_ARGS}
 
 echo "=========================================================="
 echo "End: $(date)"
