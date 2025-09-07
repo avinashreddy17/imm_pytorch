@@ -25,7 +25,7 @@ training:
 model:
     gauss_std: 0.10
     gauss_mode: 'rot'
-    n_maps: 10
+    n_maps: 5
 
     n_filters: 32
     block_sizes: [1, 1, 1]
@@ -37,9 +37,9 @@ model:
 
     reconstruction_loss: perceptual  # in {'perceptual', 'l2'}
     perceptual:
+      backend: torchvision           # use torchvision VGG16 features
       l2: True
       comp: ['input', 'conv1_2','conv2_2','conv3_2','conv4_2','conv5_2']
-      net_file: ${vgg16_path}
 
     loss_mask: True
     confidence: False

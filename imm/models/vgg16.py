@@ -12,6 +12,12 @@ import torch.nn.functional as F
 import numpy as np
 import os
 from typing import Dict, List, Optional
+try:
+    import torchvision.models as tvm
+    from torchvision.models import VGG16_Weights
+    HAS_TORCHVISION = True
+except Exception:
+    HAS_TORCHVISION = False
 
 
 class VGG16Features(nn.Module):
@@ -178,7 +184,7 @@ class VGG16Features(nn.Module):
         
         # Normalize to [0, 1] and center
         x = x / 255.0
-        x = x - 114.451 / 255.0
+        x = (x - self.img_mean) / self.img_std
         
         return x
     
@@ -244,6 +250,64 @@ class VGG16Features(nn.Module):
         
         return features
 
+
+class TorchVisionVGG16Features(nn.Module):
+    """
+    Perceptual features from torchvision VGG16 (ImageNet-pretrained).
+    - Expects RGB input in [0, 255]. We convert to [0,1] and normalize
+      with ImageNet mean/std (no grayscale conversion).
+    - Returns feature maps keyed by names in feature_layers
+      (supports 'input', 'conv1_2','conv2_2','conv3_2','conv4_2','conv5_2').
+    """
+
+    _LAYER_MAP = {
+        'conv1_2': 3,   # after ReLU
+        'conv2_2': 8,
+        'conv3_2': 13,
+        'conv4_2': 20,
+        'conv5_2': 27,
+    }
+
+    def __init__(self, feature_layers: List[str] = None):
+        super(TorchVisionVGG16Features, self).__init__()
+        if not HAS_TORCHVISION:
+            raise RuntimeError('torchvision is not available for VGG16 backend.')
+        if feature_layers is None:
+            feature_layers = ['input', 'conv1_2','conv2_2','conv3_2','conv4_2','conv5_2']
+        self.feature_layers = feature_layers
+        # Load ImageNet pretrained features and freeze
+        self.features = tvm.vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES).features
+        for p in self.features.parameters():
+            p.requires_grad = False
+        self.eval()
+
+        # ImageNet normalization
+        self.register_buffer('img_mean', torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))
+        self.register_buffer('img_std', torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
+
+    def _preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
+        # Expect x in [0,255]; convert to [0,1] & normalize
+        x = x / 255.0
+        x = (x - self.img_mean) / self.img_std
+        return x
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        input_raw = x
+        x = self._preprocess_input(x)
+        feats: Dict[str, torch.Tensor] = {}
+        if 'input' in self.feature_layers:
+            feats['input'] = input_raw
+        # Walk through features, capturing at mapped indices
+        capture_indices = set(self._LAYER_MAP.values())
+        current: torch.Tensor = x
+        for idx, layer in enumerate(self.features):
+            current = layer(current)
+            if idx in capture_indices:
+                # Find which name maps to this idx (reverse lookup)
+                for name, j in self._LAYER_MAP.items():
+                    if j == idx and name in self.feature_layers:
+                        feats[name] = current
+        return feats
 
 def build_vgg16(input_tensor: torch.Tensor, pretrained_file: str, 
                feature_layers: List[str] = None) -> Dict[str, torch.Tensor]:

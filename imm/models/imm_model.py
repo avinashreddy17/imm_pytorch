@@ -38,20 +38,31 @@ class IMMModel(BaseModel):
         super(IMMModel, self).__init__(dtype, name)
         self.config = config
         
-        # Initialize VGG16 for perceptual loss if needed
+        # Initialize VGG-16 backend for perceptual loss if needed
+        self.vgg16 = None
         if hasattr(config, 'perceptual') and config.reconstruction_loss == 'perceptual':
-            try:
-                self.vgg16 = VGG16Features(
-                    config.perceptual.net_file,
-                    config.perceptual.comp
-                )
-            except Exception as e:
-                print(f"Warning: Could not load VGG16 for perceptual loss: {e}")
-                print("Falling back to L2 loss")
-                config.reconstruction_loss = 'l2'
-                self.vgg16 = None
-        else:
-            self.vgg16 = None
+            backend = getattr(config.perceptual, 'backend', 'selfsup')
+            if backend == 'torchvision':
+                try:
+                    from .vgg16 import TorchVisionVGG16Features
+                    self.vgg16 = TorchVisionVGG16Features(config.perceptual.comp)
+                except Exception as e:
+                    print(f"Warning: TorchVision VGG16 init failed: {e}")
+                    print("Falling back to L2 loss")
+                    config.reconstruction_loss = 'l2'
+                    self.vgg16 = None
+            else:
+                # Self-supervision (colorization) backbone via HDF5 (original behavior)
+                try:
+                    self.vgg16 = VGG16Features(
+                        config.perceptual.net_file,
+                        config.perceptual.comp
+                    )
+                except Exception as e:
+                    print(f"Warning: Selfsup VGG16 init failed: {e}")
+                    print("Falling back to L2 loss")
+                    config.reconstruction_loss = 'l2'
+                    self.vgg16 = None
         
         # Build model components
         self._build_model()
@@ -118,7 +129,9 @@ class IMMModel(BaseModel):
         
         # Group embeddings by size
         grouped_embeddings = self._group_embeddings_by_size(image_embeddings)
-        grouped_pose_embeddings = self._group_embeddings_by_size(pose_embeddings)
+        # Convert pose embeddings from [B, H, W, N] to [B, N, H, W] for grouping
+        pose_embeddings_transposed = [pe.permute(0, 3, 1, 2) for pe in pose_embeddings]
+        grouped_pose_embeddings = self._group_embeddings_by_size(pose_embeddings_transposed)
         
         # Resize embeddings to match render sizes
         for render_size in render_sizes:
@@ -134,13 +147,34 @@ class IMMModel(BaseModel):
         
         # Determine extra channels for perceptual workaround (match original TF behavior)
         workaround_channels = 0
-        if hasattr(self.config, 'channels_bug_fix') and self.config.channels_bug_fix:
+        if (hasattr(self.config, 'channels_bug_fix') and self.config.channels_bug_fix and 
+            hasattr(self.config, 'perceptual') and hasattr(self.config.perceptual, 'comp')):
             workaround_channels = len(self.config.perceptual.comp)
+
 
         # Generate future image with correct number of output channels
         n_final_out = 3 + workaround_channels
         future_im_pred = self.renderer(joint_embeddings, max_size, n_final_out=n_final_out)
 
+        # Renderer now outputs [0,1] from sigmoid, scale to [0,255]
+        future_im_pred = future_im_pred * 255.0
+
+        print(f"🔧 Renderer output after scaling: [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
+
+        future_im_pred = torch.clamp(future_im_pred, 0, 255)
+        # Generate future image with correct number of output channels
+        # n_final_out = 3 + workaround_channels
+        # future_im_pred = self.renderer(joint_embeddings, max_size, n_final_out=n_final_out)
+        # # Debug: Check renderer output
+        # print(f"🔧 Raw renderer output range: [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
+
+        # # Apply proper scaling before clamping
+        # if future_im_pred.max() < 10.0:  # If output is too small
+        #     print(f"⚠️  Scaling renderer output from [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
+        #     future_im_pred = future_im_pred * 255.0  # Scale to proper range
+        #     print(f"⚠️  After scaling: [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
+
+        # future_im_pred = torch.clamp(future_im_pred, 0, 255)
         # Keep only RGB for the reconstruction loss; drop workaround channels if present
         future_im_pred_mu = future_im_pred[:, :3]
         
@@ -148,7 +182,7 @@ class IMMModel(BaseModel):
         outputs = {
             'future_im_pred': future_im_pred_mu,
             'gauss_yx': gauss_mu,
-            'pose_embeddings': pose_embeddings,
+            'pose_embeddings': pose_embeddings,  # Keep original [B, H, W, N] format
             'image_embeddings': image_embeddings
         }
         
@@ -170,6 +204,15 @@ class IMMModel(BaseModel):
         future_im = inputs['future_image']
         future_im_pred = outputs['future_im_pred']
         
+                # SAFETY CHECK: Ensure correct image range for loss computation
+        if future_im.max() <= 2.0:
+            print("⚠️  WARNING: Images in [0,1] range detected, scaling to [0,255] for loss")
+            future_im = future_im * 255.0
+            future_im_pred = future_im_pred * 255.0
+        
+        # Additional validation
+        if torch.isnan(future_im_pred).any() or torch.isinf(future_im_pred).any():
+            print("⚠️  WARNING: NaN/Inf detected in predictions")
         # Mask for loss computation
         loss_mask = inputs.get('mask', None)
         
@@ -183,20 +226,19 @@ class IMMModel(BaseModel):
             l = F.mse_loss(future_im_pred, future_im, reduction='none')
             if loss_mask is not None:
                 l = self._apply_loss_mask(l, loss_mask)
-            reconstruction_loss = 1000 * torch.mean(l)
+            reconstruction_loss =torch.mean(l)
+            print(f"🔧 L2 loss (unscaled): {reconstruction_loss.item():.6f}")
             w_reconstruct = 1.0 / 255.0
         else:
             raise ValueError(f'Unknown reconstruction loss: {self.config.reconstruction_loss}')
-        
+
         # Weight decay loss
         weight_decay_loss = 0.0
-        for param in self.parameters():
-            if param.dim() > 1:  # Only apply to weight matrices, not biases
-                weight_decay_loss += torch.sum(param ** 2)
-        weight_decay_loss *= self._conv_opts['weight_decay']
         
         # Total loss
         total_loss = w_reconstruct * reconstruction_loss + weight_decay_loss
+        print(f"🔧 Total loss components: recon={w_reconstruct * reconstruction_loss:.3f}, decay={weight_decay_loss:.6f}")
+
         
         return total_loss
     
@@ -365,7 +407,7 @@ class ImageEncoder(nn.Module):
         """Initialize weights similar to TensorFlow implementation."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.trunc_normal_(m.weight, std=0.01)
+                nn.init.trunc_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
@@ -473,7 +515,7 @@ class PoseEncoder(nn.Module):
         """Initialize weights similar to TensorFlow implementation."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.trunc_normal_(m.weight, std=0.01)
+                nn.init.trunc_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
@@ -511,8 +553,8 @@ class PoseEncoder(nn.Module):
             gauss_maps = get_gaussian_maps(
                 gauss_mu, (map_size, map_size), inv_std, self.gauss_mode
             )
-            # Convert from [B, H, W, N] to [B, N, H, W]
-            gauss_maps = gauss_maps.permute(0, 3, 1, 2)
+            # Keep as [B, H, W, N] to match TensorFlow implementation
+            # Do NOT transpose to [B, N, H, W] here
             gaussian_maps.append(gauss_maps)
         
         return gauss_mu, gaussian_maps
@@ -566,6 +608,20 @@ class SimpleRenderer(nn.Module):
         # Renderer layers will be built dynamically based on input sizes
         self.conv_layers = nn.ModuleDict()
     
+    def _initialize_layer(self, layer):
+        """Initialize a layer with TensorFlow-compatible weights."""
+        if isinstance(layer, nn.Conv2d):
+            # Use same initialization as TensorFlow
+            nn.init.trunc_normal_(layer.weight, std=0.01)
+            if layer.bias is not None:
+                nn.init.constant_(layer.bias, 0.0)
+        elif isinstance(layer, nn.Sequential):
+            for sublayer in layer:
+                self._initialize_layer(sublayer)
+        elif isinstance(layer, nn.BatchNorm2d):
+            nn.init.constant_(layer.weight, 1)
+            nn.init.constant_(layer.bias, 0)
+    
     def forward(self, joint_embeddings: Dict[int, torch.Tensor], 
                final_res: int, n_final_out: int = 3) -> torch.Tensor:
         """
@@ -596,6 +652,10 @@ class SimpleRenderer(nn.Module):
                 if current_size == final_res:
                     # Final layer
                     self.conv_layers[layer_name] = nn.Conv2d(in_channels, n_final_out, 3, padding=1, bias=True)
+                    self.conv_layers[layer_name] = nn.Sequential(
+                        nn.Conv2d(in_channels, n_final_out, 3, padding=1, bias=True),
+                        nn.Sigmoid()
+                    )
                     self.conv_layers[layer_name] = self.conv_layers[layer_name].to(x.device)
                 else:
                     # Intermediate layer

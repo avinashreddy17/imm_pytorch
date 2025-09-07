@@ -128,13 +128,79 @@ def main(args):
         
         # Create trainer
         trainer = Trainer(model, config, log_dir, device=device)
-        
+
+        # Warm-up forward to materialize any lazily created layers
+        # (e.g., renderer layers) BEFORE optimizer is built
+        # Grab one batch from the train loader safely
+        warmup_batch = None
+        for wb in train_loader:
+            warmup_batch = wb
+            break
+        if warmup_batch is not None:
+            trainer.warmup_with_batch(warmup_batch)
+        else:
+            # If for some reason loader is empty, still set up optimizer
+            trainer.setup_optimizer()
+
         # Load checkpoint if specified
         if args.checkpoint is not None:
             if osp.exists(args.checkpoint):
                 trainer.load_checkpoint(args.checkpoint, load_optimizer=args.restore_optim)
             else:
                 print(colorize('Checkpoint file not found. Starting from scratch.', 'red', bold=True))
+    
+                # ============= DEBUG CODE - ADD THIS BLOCK =============
+        print(colorize('🔍 Running pre-training debug analysis...', 'yellow', bold=True))
+        
+        def debug_first_batch():
+            model.eval()
+            with torch.no_grad():
+                for batch_idx, batch in enumerate(train_loader):
+                    if batch_idx > 0:
+                        break
+                    
+                    # Move to device
+                    for key in batch:
+                        if isinstance(batch[key], torch.Tensor):
+                            batch[key] = batch[key].to(device)
+                    
+                    print(f"📊 Batch shape: {batch['image'].shape}")
+                    print(f"📊 Input image range: [{batch['image'].min():.3f}, {batch['image'].max():.3f}]")
+                    print(f"📊 Target image range: [{batch['future_image'].min():.3f}, {batch['future_image'].max():.3f}]")
+                    
+                    # Forward pass
+                    outputs = model(batch)
+                    pred_range = f"[{outputs['future_im_pred'].min():.3f}, {outputs['future_im_pred'].max():.3f}]"
+                    print(f"📊 Prediction range: {pred_range}")
+                    
+                    # Loss computation
+                    loss = model.compute_loss(outputs, batch)
+                    print(f"📊 Loss value: {loss.item():.6f}")
+                    
+                    # Diagnostic checks
+                    if batch['image'].max() < 2.0:
+                        print(colorize('❌ ISSUE FOUND: Images in [0,1] range, should be [0,255]!', 'red', bold=True))
+                        return 'range_issue'
+                    elif loss.item() < 0.001:
+                        print(colorize('❌ ISSUE FOUND: Loss too small, likely range problem!', 'red', bold=True))
+                        return 'loss_too_small'
+                    elif torch.isnan(outputs['future_im_pred']).any():
+                        print(colorize('❌ ISSUE FOUND: NaN in predictions!', 'red', bold=True))
+                        return 'nan_predictions'
+                    else:
+                        print(colorize('✅ Initial checks passed', 'green', bold=True))
+                        return 'ok'
+            
+            model.train()
+            return 'ok'
+        
+        # Run diagnostic
+        debug_result = debug_first_batch()
+        print(f"🔍 Debug result: {debug_result}")
+        # ============= END DEBUG CODE =============
+
+        # Train
+        # trainer.train(train_loader, test_loader, num_epochs=args.num_epochs)
         
         # Train
         trainer.train(train_loader, test_loader, num_epochs=args.num_epochs)

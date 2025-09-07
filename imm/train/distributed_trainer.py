@@ -137,7 +137,7 @@ class DistributedTrainer:
                 trainer.train_epoch(train_loader, val_loader)
                 
                 # Save checkpoint (only rank 0)
-                if rank == 0 and epoch % 10 == 0:
+                if rank == 0 and epoch % 5 == 0:
                     checkpoint_path = os.path.join(log_dir, f'model_epoch_{epoch}.pth')
                     trainer.save_checkpoint(checkpoint_path)
                 
@@ -303,7 +303,7 @@ class SLURMDistributedTrainer(DistributedTrainer):
                 trainer.train_epoch(train_loader, val_loader)
                 
                 # Save checkpoint (only rank 0)
-                if self.rank == 0 and epoch % 10 == 0:
+                if self.rank == 0 and epoch % 5 == 0:
                     checkpoint_path = os.path.join(log_dir, f'model_epoch_{epoch}.pth')
                     trainer.save_checkpoint(checkpoint_path)
                 

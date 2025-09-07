@@ -105,7 +105,7 @@ def main():
     if args.iteration is not None:
         ckpt_name = f"model_epoch_{args.iteration}.pth"
     else:
-        ckpt_name = "model_epoch_40.pth"
+        ckpt_name = "model_epoch_80.pth"
     checkpoint = os.path.join(cfg.training.logdir, ckpt_name)
     if not os.path.isfile(checkpoint):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")

@@ -15,7 +15,8 @@ import cv2
 from typing import Dict, List, Tuple, Optional, Any
 from abc import ABC, abstractmethod
 
-from ..utils.tps_sampler import TPSRandomSampler
+from ..utils.tps_sampler_tf_compat import TPSRandomSamplerTFCompat
+# from ..utils.tps_sampler_normalized import TPSRandomSamplerNormalized
 
 
 class ImagePairDataset(Dataset, ABC):
@@ -73,13 +74,16 @@ class ImagePairDataset(Dataset, ABC):
         image = Image.open(image_path).convert('RGB' if channels == 3 else 'L')
         
         # Convert to numpy array
-        image_np = np.array(image)
+        image_np = np.array(image,dtype=np.float32)
         
         # Convert to tensor [H, W, C] -> [C, H, W]
         if image_np.ndim == 2:
             image_np = image_np[:, :, np.newaxis]
         
         image_tensor = torch.from_numpy(image_np).permute(2, 0, 1).float()
+
+        assert image_tensor.min() >= 0.0 and image_tensor.max() <= 255.0, \
+            f"Image range [{image_tensor.min():.1f}, {image_tensor.max():.1f}] invalid, should be [0,255]"
         
         return image_tensor
     
@@ -231,13 +235,13 @@ class TPSDataset(ImagePairDataset):
         
         self._tps = tps
         if tps:
-            self._target_sampler = TPSRandomSampler(
+            self._target_sampler = TPSRandomSamplerTFCompat(
                 image_size[0], image_size[1], 
                 vertical_points=vertical_points, horizontal_points=horizontal_points,
                 rotsd=rotsd[0], scalesd=scalesd[0], transsd=transsd[0],
                 warpsd=(warpsd[0], warpsd[1]), pad=False
             )
-            self._source_sampler = TPSRandomSampler(
+            self._source_sampler = TPSRandomSamplerTFCompat(
                 image_size[0], image_size[1],
                 vertical_points=vertical_points, horizontal_points=horizontal_points,
                 rotsd=rotsd[1], scalesd=scalesd[1], transsd=transsd[1],
@@ -295,34 +299,55 @@ class TPSDataset(ImagePairDataset):
             inputs['future_image'] = inputs['image'].clone()
             return inputs
         
-        image = inputs['image']  # [C, H, W]
-        mask = inputs.get('mask', torch.ones(1, *image.shape[1:]))  # [1, H, W]
+        # image = inputs['image']  # [C, H, W]
+        # mask = inputs.get('mask', torch.ones(1, *image.shape[1:]))  # [1, H, W]
+        
+        # # Combine image and mask for joint transformation
+        # image_with_mask = torch.cat([mask, image], dim=0)  # [C+1, H, W]
+        # image_with_mask = image_with_mask.unsqueeze(0)  # [1, C+1, H, W]
+        
+        # # Apply target transformation using TensorFlow-compatible method
+        # future_image_with_mask, _, _ = self._target_sampler(
+        #     image_with_mask, training=training
+        # )
+        
+        # # Apply source transformation using TensorFlow-compatible method
+        # image_with_mask, _, _ = self._source_sampler(
+        #     future_image_with_mask, training=training
+        # )
+        
+        # # Separate mask and image
+        # future_mask = future_image_with_mask[0, 0:1]  # [1, H, W]
+        # future_image = future_image_with_mask[0, 1:]  # [C, H, W]
+        
+        # mask = image_with_mask[0, 0:1]  # [1, H, W]
+        # image = image_with_mask[0, 1:]  # [C, H, W]
+        
+        # inputs['image'] = image
+        # inputs['future_image'] = future_image
+        # inputs['mask'] = future_mask
+        original_image = inputs['image']  # [C, H, W] - this will be our target
+        mask = inputs.get('mask', torch.ones(1, *original_image.shape[1:]))  # [1, H, W]
+        
+        # The target (future_image) is the original, unwarped image
+        inputs['future_image'] = original_image.clone()
         
         # Combine image and mask for joint transformation
-        image_with_mask = torch.cat([mask, image], dim=0)  # [C+1, H, W]
+        image_with_mask = torch.cat([mask, original_image], dim=0)  # [C+1, H, W]
         image_with_mask = image_with_mask.unsqueeze(0)  # [1, C+1, H, W]
         
-        # Apply target transformation
-        future_image_with_mask, _, _ = self._target_sampler(
+        # Apply single warp transformation to create the input image
+        warped_image_with_mask, _, _ = self._target_sampler(
             image_with_mask, training=training
         )
         
-        # Apply source transformation
-        image_with_mask, _, _ = self._source_sampler(
-            future_image_with_mask, training=training
-        )
+        # Separate mask and image from warped result
+        warped_mask = warped_image_with_mask[0, 0:1]  # [1, H, W]
+        warped_image = warped_image_with_mask[0, 1:]  # [C, H, W]
         
-        # Separate mask and image
-        future_mask = future_image_with_mask[0, 0:1]  # [1, H, W]
-        future_image = future_image_with_mask[0, 1:]  # [C, H, W]
-        
-        mask = image_with_mask[0, 0:1]  # [1, H, W]
-        image = image_with_mask[0, 1:]  # [C, H, W]
-        
-        inputs['image'] = image
-        inputs['future_image'] = future_image
-        inputs['mask'] = future_mask
-        
+        # Set the warped image as input and keep original mask for loss computation
+        inputs['image'] = warped_image
+        inputs['mask'] = mask  # Use original mask for loss computation
         return inputs
     
     def _proc_im_pair(self, inputs: Dict[str, Any], training: bool = True) -> Dict[str, torch.Tensor]:
