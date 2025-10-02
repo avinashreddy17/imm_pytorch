@@ -60,6 +60,8 @@ class VGG16Features(nn.Module):
         self.eval()
         for param in self.parameters():
             param.requires_grad = False
+        # TF selfsup preprocessing constants
+        self.register_buffer('tf_gray_offset', torch.tensor(114.451 / 255.0))
     
     def _build_network(self):
         """Build the VGG16 network architecture."""
@@ -178,14 +180,14 @@ class VGG16Features(nn.Module):
         Returns:
             Preprocessed images
         """
-        # Convert RGB to grayscale
+        # Match TF self-supervised backend:
+        # 1) Convert to grayscale by channel mean
         if x.shape[1] == 3:
             x = torch.mean(x, dim=1, keepdim=True)
-        
-        # Normalize to [0, 1] and center
+        # 2) Normalize to [0,1]
         x = x / 255.0
-        x = (x - self.img_mean) / self.img_std
-        
+        # 3) Center by 114.451/255
+        x = x - self.tf_gray_offset
         return x
     
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:

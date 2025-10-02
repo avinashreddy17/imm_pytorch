@@ -1,0 +1,6 @@
+logdir: logs # directory for training logs and checkpoints
+
+celeba_data_dir: ../../Mtp/data/celeba
+aflw_data_dir: ../../Mtp/data/aflw_release-2
+
+vgg16_path: ../../vgg16.caffemodel.h5 # path to pretrained VGG16 for perceptual loss

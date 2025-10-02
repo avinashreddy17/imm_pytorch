@@ -42,24 +42,25 @@ class IMMModel(BaseModel):
         self.vgg16 = None
         if hasattr(config, 'perceptual') and config.reconstruction_loss == 'perceptual':
             backend = getattr(config.perceptual, 'backend', 'selfsup')
-            if backend == 'torchvision':
+            if backend == 'selfsup':
+                # Self-supervised backend: grayscale + TF centering
+                try:
+                    self.vgg16 = VGG16Features(
+                        getattr(config.perceptual, 'net_file', ''),
+                        config.perceptual.comp
+                    )
+                except Exception as e:
+                    print(f"Warning: Selfsup VGG16 init failed: {e}")
+                    print("Falling back to L2 loss")
+                    config.reconstruction_loss = 'l2'
+                    self.vgg16 = None
+            else:
+                # TorchVision fallback only if explicitly requested
                 try:
                     from .vgg16 import TorchVisionVGG16Features
                     self.vgg16 = TorchVisionVGG16Features(config.perceptual.comp)
                 except Exception as e:
                     print(f"Warning: TorchVision VGG16 init failed: {e}")
-                    print("Falling back to L2 loss")
-                    config.reconstruction_loss = 'l2'
-                    self.vgg16 = None
-            else:
-                # Self-supervision (colorization) backbone via HDF5 (original behavior)
-                try:
-                    self.vgg16 = VGG16Features(
-                        config.perceptual.net_file,
-                        config.perceptual.comp
-                    )
-                except Exception as e:
-                    print(f"Warning: Selfsup VGG16 init failed: {e}")
                     print("Falling back to L2 loss")
                     config.reconstruction_loss = 'l2'
                     self.vgg16 = None
@@ -104,12 +105,19 @@ class IMMModel(BaseModel):
         Returns:
             Dictionary containing model outputs and intermediate results
         """
+        print(f"\n🔍 === IMM MODEL FORWARD PASS (training={training}) ===")
+        
         im = inputs['image']  # [B, C, H, W]
         future_im = inputs['future_image']  # [B, C, H, W]
+        
+        print(f"🔍 Input shapes: im={im.shape}, future_im={future_im.shape}")
+        print(f"🔍 Input ranges: im=[{im.min():.3f}, {im.max():.3f}], future_im=[{future_im.min():.3f}, {future_im.max():.3f}]")
+        print(f"🔍 Input means: im={im.mean():.3f}, future_im={future_im.mean():.3f}")
         
         batch_size, channels, height, width = future_im.shape
         assert height == width, "Only square images are supported"
         max_size = height
+        print(f"🔍 Max size: {max_size}")
         
         # Determine renderer sizes
         render_sizes = []
@@ -121,29 +129,47 @@ class IMMModel(BaseModel):
                 break
             size = size // stride
         
+        print(f"🔍 Render sizes: {render_sizes}")
+        
         # Extract image features
+        print(f"\n🔍 === IMAGE ENCODER ===")
         image_embeddings = self.image_encoder(im)
+        print(f"🔍 Image embeddings count: {len(image_embeddings)}")
+        for i, emb in enumerate(image_embeddings):
+            print(f"🔍 Image embedding {i}: shape={emb.shape}, range=[{emb.min():.3f}, {emb.max():.3f}], mean={emb.mean():.3f}")
         
         # Extract pose features and landmarks
+        print(f"\n🔍 === POSE ENCODER ===")
         gauss_mu, pose_embeddings = self.pose_encoder(future_im, render_sizes)
+        print(f"🔍 Pose landmarks (gauss_mu): shape={gauss_mu.shape}, range=[{gauss_mu.min():.3f}, {gauss_mu.max():.3f}], mean={gauss_mu.mean():.3f}")
+        print(f"🔍 Pose embeddings count: {len(pose_embeddings)}")
+        for i, pe in enumerate(pose_embeddings):
+            print(f"🔍 Pose embedding {i}: shape={pe.shape}, range=[{pe.min():.3f}, {pe.max():.3f}], mean={pe.mean():.3f}")
         
         # Group embeddings by size
+        print(f"\n🔍 === GROUPING EMBEDDINGS ===")
         grouped_embeddings = self._group_embeddings_by_size(image_embeddings)
+        print(f"🔍 Grouped image embeddings by size: {list(grouped_embeddings.keys())}")
+        
         # Convert pose embeddings from [B, H, W, N] to [B, N, H, W] for grouping
         pose_embeddings_transposed = [pe.permute(0, 3, 1, 2) for pe in pose_embeddings]
         grouped_pose_embeddings = self._group_embeddings_by_size(pose_embeddings_transposed)
+        print(f"🔍 Grouped pose embeddings by size: {list(grouped_pose_embeddings.keys())}")
         
         # Resize embeddings to match render sizes
         for render_size in render_sizes:
             if render_size not in grouped_embeddings:
+                print(f"🔍 Resizing embeddings for size {render_size}")
                 self._add_resized_embeddings(grouped_embeddings, render_size)
         
         # Create joint embeddings
+        print(f"\n🔍 === JOINT EMBEDDINGS ===")
         joint_embeddings = {}
         for rs in render_sizes:
             joint_embeddings[rs] = torch.cat(
                 grouped_embeddings[rs] + grouped_pose_embeddings[rs], dim=1
             )
+            print(f"🔍 Joint embedding {rs}: shape={joint_embeddings[rs].shape}, range=[{joint_embeddings[rs].min():.3f}, {joint_embeddings[rs].max():.3f}], mean={joint_embeddings[rs].mean():.3f}")
         
         # Determine extra channels for perceptual workaround (match original TF behavior)
         workaround_channels = 0
@@ -151,31 +177,17 @@ class IMMModel(BaseModel):
             hasattr(self.config, 'perceptual') and hasattr(self.config.perceptual, 'comp')):
             workaround_channels = len(self.config.perceptual.comp)
 
+        print(f"\n🔍 === RENDERER ===")
+        print(f"🔍 Workaround channels: {workaround_channels}")
 
         # Generate future image with correct number of output channels
         n_final_out = 3 + workaround_channels
+        print(f"🔍 Final output channels: {n_final_out}")
         future_im_pred = self.renderer(joint_embeddings, max_size, n_final_out=n_final_out)
 
-        # Renderer now outputs [0,1] from sigmoid, scale to [0,255]
-        future_im_pred = future_im_pred * 255.0
-
-        print(f"🔧 Renderer output after scaling: [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
-
-        future_im_pred = torch.clamp(future_im_pred, 0, 255)
-        # Generate future image with correct number of output channels
-        # n_final_out = 3 + workaround_channels
-        # future_im_pred = self.renderer(joint_embeddings, max_size, n_final_out=n_final_out)
-        # # Debug: Check renderer output
-        # print(f"🔧 Raw renderer output range: [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
-
-        # # Apply proper scaling before clamping
-        # if future_im_pred.max() < 10.0:  # If output is too small
-        #     print(f"⚠️  Scaling renderer output from [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
-        #     future_im_pred = future_im_pred * 255.0  # Scale to proper range
-        #     print(f"⚠️  After scaling: [{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
-
-        # future_im_pred = torch.clamp(future_im_pred, 0, 255)
+        print(f"🔍 Raw renderer output: shape={future_im_pred.shape}, range=[{future_im_pred.min():.3f}, {future_im_pred.max():.3f}], mean={future_im_pred.mean():.3f}")
         # Keep only RGB for the reconstruction loss; drop workaround channels if present
+        # Keep only RGB for reconstruction loss (no scaling/clamping here to match TF)
         future_im_pred_mu = future_im_pred[:, :3]
         
         # Prepare outputs
@@ -201,14 +213,20 @@ class IMMModel(BaseModel):
         Returns:
             Total loss tensor
         """
+        print(f"\n🔍 === LOSS COMPUTATION (training={training}) ===")
+        
         future_im = inputs['future_image']
         future_im_pred = outputs['future_im_pred']
         
-                # SAFETY CHECK: Ensure correct image range for loss computation
+        print(f"🔍 Loss inputs: future_im shape={future_im.shape}, future_im_pred shape={future_im_pred.shape}")
+        print(f"🔍 Loss ranges: future_im=[{future_im.min():.3f}, {future_im.max():.3f}], future_im_pred=[{future_im_pred.min():.3f}, {future_im_pred.max():.3f}]")
+        print(f"🔍 Loss means: future_im={future_im.mean():.3f}, future_im_pred={future_im_pred.mean():.3f}")
+        
+        # SAFETY CHECK: Ensure correct image range for loss computation
         if future_im.max() <= 2.0:
             print("⚠️  WARNING: Images in [0,1] range detected, scaling to [0,255] for loss")
             future_im = future_im * 255.0
-            future_im_pred = future_im_pred * 255.0
+            # future_im_pred is already scaled in forward method
         
         # Additional validation
         if torch.isnan(future_im_pred).any() or torch.isinf(future_im_pred).any():
@@ -217,27 +235,36 @@ class IMMModel(BaseModel):
         loss_mask = inputs.get('mask', None)
         
         # Reconstruction loss
+        print(f"🔍 Reconstruction loss type: {self.config.reconstruction_loss}")
         if self.config.reconstruction_loss == 'perceptual' and self.vgg16 is not None:
+            print(f"🔍 Computing perceptual loss...")
             reconstruction_loss = self._perceptual_loss(
                 future_im, future_im_pred, training, loss_mask
             )
             w_reconstruct = 1.0
+            print(f"🔍 Perceptual loss: {reconstruction_loss.item():.6f}, w_reconstruct: {w_reconstruct:.6f}")
         elif self.config.reconstruction_loss == 'l2':
+            print(f"🔍 Computing L2 loss...")
             l = F.mse_loss(future_im_pred, future_im, reduction='none')
+            print(f"🔍 Raw L2 loss: mean={torch.mean(l).item():.6f}, shape={l.shape}")
             if loss_mask is not None:
+                print(f"🔍 Applying loss mask...")
                 l = self._apply_loss_mask(l, loss_mask)
-            reconstruction_loss =torch.mean(l)
-            print(f"🔧 L2 loss (unscaled): {reconstruction_loss.item():.6f}")
-            w_reconstruct = 1.0 / 255.0
+                print(f"🔍 Masked L2 loss: mean={torch.mean(l).item():.6f}")
+            reconstruction_loss = 1000.0 * torch.mean(l)  # Match TF scaling exactly
+            print(f"🔍 L2 loss (scaled by 1000): {reconstruction_loss.item():.6f}")
+            w_reconstruct = 1.0/255.0  # No additional scaling needed
         else:
             raise ValueError(f'Unknown reconstruction loss: {self.config.reconstruction_loss}')
 
-        # Weight decay loss
-        weight_decay_loss = 0.0
+        # Weight decay loss (match TF implementation)
+        print(f"🔍 Computing weight decay loss...")
+        weight_decay_loss = self._decay()
+        print(f"🔍 Weight decay loss: {weight_decay_loss.item():.6f}")
         
         # Total loss
         total_loss = w_reconstruct * reconstruction_loss + weight_decay_loss
-        print(f"🔧 Total loss components: recon={w_reconstruct * reconstruction_loss:.3f}, decay={weight_decay_loss:.6f}")
+        print(f"🔍 Total loss components: recon={w_reconstruct * reconstruction_loss:.6f}, decay={weight_decay_loss:.6f}, total={total_loss.item():.6f}")
 
         
         return total_loss
@@ -262,26 +289,29 @@ class IMMModel(BaseModel):
         # Extract VGG features
         feats = self.vgg16(ims)
         
-        # Split features back
-        feat_names = list(feats.keys())
+        # Use only the specified feature layers (match TF behavior)
+        feat_names = self.config.perceptual.comp
         feat_gt = {}
         feat_pred = {}
         
         batch_size = gt_image.shape[0]
         for name in feat_names:
-            feat_gt[name] = feats[name][:batch_size]
-            feat_pred[name] = feats[name][batch_size:]
+            if name in feats:
+                feat_gt[name] = feats[name][:batch_size]
+                feat_pred[name] = feats[name][batch_size:]
         
         # Compute losses with adaptive weighting
         losses = []
+        # Match TF weights exactly: [100.0, 1.6, 2.3, 1.8, 2.8, 100.0]
+        # These correspond to ['input','conv1_2','conv2_2','conv3_2','conv4_2','conv5_2']
         weights = [100.0, 1.6, 2.3, 1.8, 2.8, 100.0]
         
         # Use L2 or L1 loss
         loss_fn = F.mse_loss if self.config.perceptual.l2 else F.l1_loss
         
         for i, name in enumerate(feat_names):
-            if i >= len(weights):
-                break
+            if i >= len(weights) or name not in feat_gt:
+                continue
                 
             # Compute feature loss
             feat_loss = loss_fn(feat_pred[name], feat_gt[name], reduction='none')
@@ -297,12 +327,20 @@ class IMMModel(BaseModel):
             )
             
             # Normalize by weight and compute mean
-            normalized_loss = torch.mean(feat_loss / weight)
+            normalized_loss = torch.mean(_apply_loss_mask(feat_loss / weight, loss_mask))
             losses.append(normalized_loss)
         
         # Combine losses
         total_loss = 1000.0 * sum(losses)
         return total_loss
+    
+    def _decay(self) -> torch.Tensor:
+        """Compute weight decay loss (L2 regularization) - matches TF wd=1e-5."""
+        weight_decay = 0.0
+        for param in self.parameters():
+            if param.requires_grad:
+                weight_decay += torch.sum(param ** 2)
+        return self._conv_opts['weight_decay'] * weight_decay  # Match TF's wd=1e-5
     
     def _apply_loss_mask(self, loss_map: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Apply loss mask to loss map."""
@@ -424,22 +462,28 @@ class ImageEncoder(nn.Module):
         Returns:
             List of feature maps at different resolutions
         """
+        print(f"🔍 ImageEncoder input: shape={x.shape}, range=[{x.min():.3f}, {x.max():.3f}], mean={x.mean():.3f}")
+        
         features = [x]  # Include input image
         
         # Block 1
         x1 = self.block1(x)
+        print(f"🔍 ImageEncoder block1: shape={x1.shape}, range=[{x1.min():.3f}, {x1.max():.3f}], mean={x1.mean():.3f}")
         features.append(x1)
         
         # Block 2
         x2 = self.block2(x1)
+        print(f"🔍 ImageEncoder block2: shape={x2.shape}, range=[{x2.min():.3f}, {x2.max():.3f}], mean={x2.mean():.3f}")
         features.append(x2)
         
         # Block 3
         x3 = self.block3(x2)
+        print(f"🔍 ImageEncoder block3: shape={x3.shape}, range=[{x3.min():.3f}, {x3.max():.3f}], mean={x3.mean():.3f}")
         features.append(x3)
         
         # Block 4
         x4 = self.block4(x3)
+        print(f"🔍 ImageEncoder block4: shape={x4.shape}, range=[{x4.min():.3f}, {x4.max():.3f}], mean={x4.mean():.3f}")
         features.append(x4)
         
         return features
@@ -533,26 +577,37 @@ class PoseEncoder(nn.Module):
         Returns:
             Tuple of (landmark coordinates, Gaussian maps at different sizes)
         """
+        print(f"🔍 PoseEncoder input: shape={x.shape}, range=[{x.min():.3f}, {x.max():.3f}], mean={x.mean():.3f}")
+        print(f"🔍 PoseEncoder map_sizes: {map_sizes}")
+        
         # Encode features
         x1 = self.block1(x)
+        print(f"🔍 PoseEncoder block1: shape={x1.shape}, range=[{x1.min():.3f}, {x1.max():.3f}], mean={x1.mean():.3f}")
         x2 = self.block2(x1)
+        print(f"🔍 PoseEncoder block2: shape={x2.shape}, range=[{x2.min():.3f}, {x2.max():.3f}], mean={x2.mean():.3f}")
         x3 = self.block3(x2)
+        print(f"🔍 PoseEncoder block3: shape={x3.shape}, range=[{x3.min():.3f}, {x3.max():.3f}], mean={x3.mean():.3f}")
         x4 = self.block4(x3)
+        print(f"🔍 PoseEncoder block4: shape={x4.shape}, range=[{x4.min():.3f}, {x4.max():.3f}], mean={x4.mean():.3f}")
         
         # Predict heatmaps
         heatmaps = self.final_conv(x4)  # [B, n_maps, H, W]
+        print(f"🔍 PoseEncoder heatmaps: shape={heatmaps.shape}, range=[{heatmaps.min():.3f}, {heatmaps.max():.3f}], mean={heatmaps.mean():.3f}")
         
         # Extract coordinates from heatmaps
         gauss_mu = self._extract_coordinates(heatmaps)
+        print(f"🔍 PoseEncoder coordinates (gauss_mu): shape={gauss_mu.shape}, range=[{gauss_mu.min():.3f}, {gauss_mu.max():.3f}], mean={gauss_mu.mean():.3f}")
         
         # Generate Gaussian maps at different sizes
         gaussian_maps = []
         inv_std = 1.0 / self.gauss_std
+        print(f"🔍 PoseEncoder inv_std: {inv_std}, gauss_mode: {self.gauss_mode}")
         
-        for map_size in map_sizes:
+        for i, map_size in enumerate(map_sizes):
             gauss_maps = get_gaussian_maps(
                 gauss_mu, (map_size, map_size), inv_std, self.gauss_mode
             )
+            print(f"🔍 PoseEncoder gaussian_map {i} (size {map_size}): shape={gauss_maps.shape}, range=[{gauss_maps.min():.3f}, {gauss_maps.max():.3f}], mean={gauss_maps.mean():.3f}")
             # Keep as [B, H, W, N] to match TensorFlow implementation
             # Do NOT transpose to [B, N, H, W] here
             gaussian_maps.append(gauss_maps)
@@ -635,30 +690,41 @@ class SimpleRenderer(nn.Module):
         Returns:
             Generated image [B, n_final_out, final_res, final_res]
         """
+        print(f"🔍 SimpleRenderer input:")
+        print(f"🔍   joint_embeddings sizes: {list(joint_embeddings.keys())}")
+        print(f"🔍   final_res: {final_res}, n_final_out: {n_final_out}")
+        
         # Start with the smallest resolution
         sizes = sorted(joint_embeddings.keys())
         x = joint_embeddings[sizes[0]]  # Start with smallest size (e.g., 16x16)
+        print(f"🔍 SimpleRenderer starting with size {sizes[0]}: shape={x.shape}, range=[{x.min():.3f}, {x.max():.3f}], mean={x.mean():.3f}")
         
         current_size = sizes[0]
         filters = self.n_filters_render * 8
         conv_id = 1
+        print(f"🔍 SimpleRenderer initial filters: {filters}")
         
         while current_size <= final_res:
+            print(f"🔍 SimpleRenderer processing size {current_size} (target: {final_res})")
+            
             # Create or get convolution layer
             layer_name = f'conv_{conv_id}'
             if layer_name not in self.conv_layers:
                 in_channels = x.shape[1]
+                print(f"🔍 SimpleRenderer creating layer {layer_name}: in_channels={in_channels}")
                 
                 if current_size == final_res:
                     # Final layer
+                    print(f"🔍 SimpleRenderer creating FINAL layer with {n_final_out} output channels (NO SIGMOID)")
                     self.conv_layers[layer_name] = nn.Conv2d(in_channels, n_final_out, 3, padding=1, bias=True)
                     self.conv_layers[layer_name] = nn.Sequential(
                         nn.Conv2d(in_channels, n_final_out, 3, padding=1, bias=True),
-                        nn.Sigmoid()
+                        # nn.Sigmoid()
                     )
                     self.conv_layers[layer_name] = self.conv_layers[layer_name].to(x.device)
                 else:
                     # Intermediate layer
+                    print(f"🔍 SimpleRenderer creating intermediate layer with {filters} filters")
                     self.conv_layers[layer_name] = nn.Sequential(
                         nn.Conv2d(in_channels, filters, 3, padding=1, bias=True),
                         nn.BatchNorm2d(filters),
@@ -667,7 +733,9 @@ class SimpleRenderer(nn.Module):
                     self.conv_layers[layer_name] = self.conv_layers[layer_name].to(x.device)
             
             # Apply convolution
+            x_before = x
             x = self.conv_layers[layer_name](x)
+            print(f"🔍 SimpleRenderer {layer_name}: {x_before.shape} -> {x.shape}, range=[{x.min():.3f}, {x.max():.3f}], mean={x.mean():.3f}")
             
             if current_size == final_res:
                 break
@@ -684,13 +752,13 @@ class SimpleRenderer(nn.Module):
                 
                 x = self.conv_layers[layer_name2](x)
                 
-                # Upsample to next resolution
-                next_size = current_size * 2
-                x = F.interpolate(x, size=(next_size, next_size), mode='bilinear', align_corners=False)
-                current_size = next_size
-                
-                conv_id += 2
-                if filters >= 8:
-                    filters //= 2
+            # Upsample to next resolution
+            next_size = current_size * 2
+            x = F.interpolate(x, size=(next_size, next_size), mode='bilinear', align_corners=False)
+            current_size = next_size
+            
+            conv_id += 2
+            if filters >= 8:
+                filters //= 2
         
         return x

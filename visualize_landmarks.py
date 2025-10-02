@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Visualize landmarks from current checkpoint.
+Visualize landmarks from trained IMM model.
 """
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import numpy as np
 import os
 import sys
@@ -18,8 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from imm.models.imm_model import IMMModel
 from imm.utils.box import Box
 from imm.utils.dataset_import import import_dataset
-from imm.utils.utils import colorize_landmark_maps
-import metayaml
+from torch.utils.data import DataLoader
 
 
 def load_model_from_checkpoint(checkpoint_path, config):
@@ -33,7 +32,7 @@ def load_model_from_checkpoint(checkpoint_path, config):
     missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     
     if missing_keys:
-        print(f"⚠️  Missing keys: {len(missing_keys)} (this is normal for renderer layers)")
+        print(f"⚠️  Missing keys: {len(missing_keys)}")
     if unexpected_keys:
         print(f"⚠️  Unexpected keys: {len(unexpected_keys)} (will be ignored)")
     
@@ -44,48 +43,21 @@ def load_model_from_checkpoint(checkpoint_path, config):
     return model
 
 
-def warmup_model(model, dataloader, device, checkpoint_path):
-    """Warmup model to create dynamic layers, then reload checkpoint."""
-    model.eval()
+def create_dummy_batch(device, batch_size=6, image_size=128):
+    """Create dummy batch for visualization when dataset is not available."""
+    # Create random images
+    images = torch.randint(0, 255, (batch_size, 3, image_size, image_size), dtype=torch.float32)
     
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            if batch_idx >= 1:  # Only need first batch
-                break
-                
-            # Move to device
-            for key in batch:
-                if isinstance(batch[key], torch.Tensor):
-                    batch[key] = batch[key].to(device)
-            
-            # Run forward pass to create renderer layers
-            print("🔧 Running warmup forward pass to create renderer layers...")
-            try:
-                outputs = model(batch, training=False)
-                print("✅ Renderer layers created successfully")
-                break
-            except Exception as e:
-                print(f"⚠️  Warmup failed: {e}")
-                return False
+    # Create slightly different target images (add some noise)
+    target_images = images + torch.randint(-20, 20, images.shape, dtype=torch.float32)
+    target_images = torch.clamp(target_images, 0, 255)
     
-    # Now reload the checkpoint properly for renderer layers
-    print("🔧 Reloading checkpoint for renderer layers...")
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    batch = {
+        'image': images.to(device),              # Input/warped image
+        'future_image': target_images.to(device),  # Target image to reconstruct
+    }
     
-    # Load only the renderer layers from checkpoint
-    model_state = checkpoint['model_state_dict']
-    current_state = model.state_dict()
-    
-    # Update only the keys that exist in both
-    updated_keys = 0
-    for key in model_state:
-        if key in current_state:
-            current_state[key] = model_state[key]
-            updated_keys += 1
-    
-    model.load_state_dict(current_state)
-    print(f"✅ Updated {updated_keys} parameters from checkpoint")
-    return True
+    return batch
 
 
 def visualize_landmarks(model, dataloader, device, num_samples=8):
@@ -105,90 +77,115 @@ def visualize_landmarks(model, dataloader, device, num_samples=8):
             # Forward pass
             outputs = model(batch, training=False)
             
-            # Get samples to visualize
-            batch_size = min(num_samples, batch['image'].shape[0])
+            # Get images and landmarks
+            input_images = batch['image'][:num_samples].cpu()
+            target_images = batch['future_image'][:num_samples].cpu()
+            pred_images = outputs['future_im_pred'][:num_samples].cpu()
+            landmarks = outputs['gauss_yx'][:num_samples].cpu()  # [B, N, 2]
+        
+        # Convert images from [0,255] to [0,1] for matplotlib
+        input_images = input_images / 255.0
+        target_images = target_images / 255.0
+        pred_images = torch.clamp(pred_images / 255.0, 0, 1)
+        
+        # Convert landmarks from model coordinates to image coordinates
+        # Landmarks are in [-1,1] range, convert to [0, image_size]
+        H, W = input_images.shape[2], input_images.shape[3]
+        landmarks_img = (landmarks + 1) * 0.5  # [-1,1] -> [0,1]
+        landmarks_img[:, :, 0] *= W  # x coordinates
+        landmarks_img[:, :, 1] *= H  # y coordinates
+        
+        # Create visualization
+        fig, axes = plt.subplots(4, num_samples, figsize=(2*num_samples, 8))
+        if num_samples == 1:
+            axes = axes.reshape(-1, 1)
+        
+        for i in range(num_samples):
+            # Row 1: Input images
+            ax = axes[0, i]
+            ax.imshow(input_images[i].permute(1, 2, 0))
+            ax.set_title(f'Input {i+1}')
+            ax.axis('off')
             
-            # Create visualization
-            fig, axes = plt.subplots(3, batch_size, figsize=(batch_size * 3, 9))
-            if batch_size == 1:
-                axes = axes.reshape(3, 1)
+            # Row 2: Target images  
+            ax = axes[1, i]
+            ax.imshow(target_images[i].permute(1, 2, 0))
+            ax.set_title(f'Target {i+1}')
+            ax.axis('off')
             
-            for i in range(batch_size):
-                # Original images
-                input_img = batch['image'][i].cpu().permute(1, 2, 0).numpy()
-                target_img = batch['future_image'][i].cpu().permute(1, 2, 0).numpy()
-                
-                # Normalize for display
-                def normalize_img(img):
-                    if img.max() > 2.0:
-                        img = img / 255.0
-                    return np.clip(img, 0, 1)
-                
-                input_img = normalize_img(input_img)
-                target_img = normalize_img(target_img)
-                
-                # Show input image
-                axes[0, i].imshow(input_img)
-                axes[0, i].set_title(f'Input {i+1}')
-                axes[0, i].axis('off')
-                
-                # Show target image
-                axes[1, i].imshow(target_img)
-                axes[1, i].set_title(f'Target {i+1}')
-                axes[1, i].axis('off')
-                
-                # Show landmarks on target
-                if 'pose_embeddings' in outputs and len(outputs['pose_embeddings']) > 0:
-                    # Get landmark maps (largest resolution)
-                    pose_maps = outputs['pose_embeddings'][0][i:i+1]  # [1, H, W, N]
-                    
-                    # Colorize landmarks
-                    colored_landmarks = colorize_landmark_maps(pose_maps)  # [1, H, W, 3]
-                    colored_landmarks = colored_landmarks.squeeze(0).cpu().numpy()
-                    colored_landmarks = np.clip(colored_landmarks, 0, 1)
-                    
-                    # Overlay landmarks on target image
-                    overlay = target_img * 0.7 + colored_landmarks * 0.3
-                    axes[2, i].imshow(overlay)
-                    axes[2, i].set_title(f'Landmarks {i+1}')
-                else:
-                    axes[2, i].text(0.5, 0.5, 'No landmarks', ha='center', va='center')
-                    axes[2, i].set_title(f'No Landmarks {i+1}')
-                
-                axes[2, i].axis('off')
+            # Row 3: Predicted images
+            ax = axes[2, i]
+            ax.imshow(pred_images[i].permute(1, 2, 0))
+            ax.set_title(f'Predicted {i+1}')
+            ax.axis('off')
             
-            plt.tight_layout()
+            # Row 4: Landmarks on target images
+            ax = axes[3, i]
+            ax.imshow(target_images[i].permute(1, 2, 0))
             
-            # Save visualization
-            save_path = 'current_landmarks_visualization.png'
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            plt.show()
+            # Plot landmarks as colored dots
+            n_landmarks = landmarks_img.shape[1]
+            colors = plt.cm.rainbow(np.linspace(0, 1, n_landmarks))
             
-            print(f"🎯 Visualization saved: {save_path}")
+            for j in range(n_landmarks):
+                x, y = landmarks_img[i, j, 0], landmarks_img[i, j, 1]
+                ax.scatter(x, y, c=[colors[j]], s=50, marker='o', edgecolors='white', linewidth=1)
+                ax.text(x+2, y+2, str(j), fontsize=8, color='white', weight='bold')
             
-            # Print landmark coordinates
-            if 'gauss_yx' in outputs:
-                coords = outputs['gauss_yx'][0].cpu().numpy()  # [N_MAPS, 2]
-                print(f"\n📍 Landmark coordinates for first image:")
-                for j, (y, x) in enumerate(coords):
-                    print(f"  Landmark {j+1}: ({x:.3f}, {y:.3f})")
-            
-            break
+            ax.set_title(f'Landmarks {i+1} ({n_landmarks} pts)')
+            ax.axis('off')
+        
+        plt.tight_layout()
+        
+        # Save visualization
+        output_path = 'current_landmarks_visualization.png'
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Saved visualization to {output_path}")
+        
+        # Print landmark coordinates
+        print(f"\n📍 Landmark Coordinates (image coordinates):")
+        for i in range(min(2, num_samples)):  # Show first 2 samples
+            print(f"Sample {i+1}:")
+            for j in range(landmarks_img.shape[1]):
+                x, y = landmarks_img[i, j, 0].item(), landmarks_img[i, j, 1].item()
+                print(f"  Landmark {j}: ({x:.1f}, {y:.1f})")
+        
+        plt.show()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Visualize landmarks from checkpoint')
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint')
-    parser.add_argument('--config', type=str, default='configs/experiments/celeba-10pts-mini.yaml')
-    parser.add_argument('--paths', type=str, default='configs/paths/default.yaml')
-    parser.add_argument('--num-samples', type=int, default=8, help='Number of samples to visualize')
+    parser = argparse.ArgumentParser(description='Visualize landmarks from trained model')
+    parser.add_argument('--checkpoint', required=True, help='Path to model checkpoint')
+    parser.add_argument('--num-samples', type=int, default=6, help='Number of samples to visualize')
+    parser.add_argument('--config', default='configs/paths/default.yaml configs/experiments/celeba-10pts-mini.yaml', 
+                       help='Config files (space separated)')
     
     args = parser.parse_args()
     
     # Load configuration
-    config = Box(metayaml.read([args.paths, args.config]))
+    import yaml
+    import os
+    config_files = args.config.split()
     
-    # Setup device
+    # Load and merge config files manually
+    config_dict = {}
+    for config_file in config_files:
+        with open(config_file, 'r') as f:
+            file_config = yaml.safe_load(f)
+            if file_config:
+                config_dict.update(file_config)
+    
+    # Resolve path variables
+    if 'celeba_data_dir' in config_dict:
+        celeba_path = config_dict['celeba_data_dir']
+        if celeba_path.startswith('../'):
+            # Convert relative path to absolute
+            celeba_path = os.path.abspath(os.path.join(os.path.dirname(__file__), celeba_path))
+            config_dict['celeba_data_dir'] = celeba_path
+            print(f"🔧 Resolved celeba_data_dir to: {celeba_path}")
+    
+    config = Box(config_dict)
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
@@ -196,8 +193,9 @@ def main():
     model = load_model_from_checkpoint(args.checkpoint, config)
     model = model.to(device)
     
-    # Create dataset
-    dataset_class = import_dataset(config.training.dset)
+    # Load dataset
+    print(f"🔧 Loading real dataset...")
+    dataset_class = import_dataset(config.training.train_dset_params.dataset)
     
     # Test dataset params
     test_params = {}
@@ -212,7 +210,7 @@ def main():
     
     # Create test dataset
     test_dataset = dataset_class(
-        config.training.datadir, 
+        config.celeba_data_dir,  # Use resolved celeba_data_dir
         subset=test_subset, 
         max_samples=50,  # Only load 50 images for quick viz
         **test_params
@@ -221,8 +219,37 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=args.num_samples, shuffle=True)
     
     # Warmup model to create renderer layers and reload checkpoint
-    print(f"🔧 Warming up model and loading checkpoint properly...")
-    success = warmup_model(model, test_loader, device, args.checkpoint)
+    print(f"🔧 Warming up model with real data...")
+    success = False
+    
+    model.eval()
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            if batch_idx >= 1:  # Only need first batch
+                break
+                
+            # Move to device
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].to(device)
+            
+            try:
+                # Forward pass to create dynamic layers
+                print("🔧 Running warmup forward pass...")
+                outputs = model(batch, training=False)
+                print(f"✅ Warmup successful! Model ready.")
+                
+                # Reload checkpoint to ensure all layers are properly loaded
+                checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                print(f"✅ Checkpoint reloaded after warmup")
+                
+                success = True
+                break
+                
+            except Exception as e:
+                print(f"❌ Warmup failed: {e}")
+                break
     
     if not success:
         print("❌ Failed to warmup model. Exiting.")
@@ -230,6 +257,7 @@ def main():
     
     # Visualize landmarks
     print(f"🔍 Visualizing landmarks from {args.checkpoint}")
+    print(f"📸 Using real CelebA images for landmark detection")
     visualize_landmarks(model, test_loader, device, args.num_samples)
 
 

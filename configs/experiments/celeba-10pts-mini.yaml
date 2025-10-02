@@ -32,11 +32,11 @@ model:
   n_filters_render: 32
   renderer_stride: 2
   min_res: 16
-  reconstruction_loss: l2
-  # perceptual:
-  #   backend: torchvision
-  #   l2: True
-  #   comp: ['input','conv1_2','conv2_2','conv3_2','conv4_2','conv5_2']
+  reconstruction_loss: perceptual
+  perceptual:
+    backend: torchvision
+    l2: True
+    comp: ['input','conv1_2','conv2_2','conv3_2','conv4_2','conv5_2']
   loss_mask: True
-  channels_bug_fix: False  # Set to False for L2 loss (True only needed for perceptual)
+  channels_bug_fix: True  # Set to False for L2 loss (True only needed for perceptual)
 
